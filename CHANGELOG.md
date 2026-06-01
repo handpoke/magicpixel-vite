@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2
+
+### Fixed
+- **Broken `@magicpixelart/cli` dependency in 0.1.1.** The published tarball pinned the CLI to a local `file:` path (`file:../../../../../tmp/magicpixelart-cli-0.3.3.tgz`) that only existed on the publisher's machine, causing `npm i -D @magicpixelart/vite` to fail with `ENOENT` on fresh installs. Now correctly resolves `@magicpixelart/cli@^0.3.3` from the registry.
+
+
+
 ## 0.1.1
 
 ### Added
