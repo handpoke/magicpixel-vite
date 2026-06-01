@@ -1,0 +1,58 @@
+{
+  "name": "@magicpixelart/vite",
+  "version": "0.1.1",
+  "description": "Vite plugin that auto-syncs MagicPixel pixel-art assets into your project — no second terminal required.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "magicpixel",
+    "vite",
+    "vite-plugin",
+    "pixel-art",
+    "asset-sync",
+    "gamedev",
+    "sprites",
+    "hmr"
+  ],
+  "homepage": "https://magicpixel.art",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/handpoke/magicpixel-vite.git"
+  },
+  "bugs": {
+    "url": "https://github.com/handpoke/magicpixel-vite/issues"
+  },
+  "license": "MIT",
+  "author": "MagicPixel",
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@magicpixelart/cli": "^0.3.3"
+  },
+  "peerDependencies": {
+    "vite": "^4.0.0 || ^5.0.0 || ^6.0.0 || ^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0"
+  }
+}
