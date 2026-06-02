@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3
+
+### Changed
+- Depend on `@magicpixelart/cli@^0.4.0` (aligns with the current CLI release; `^0.5.0` was unpublished and broke fresh installs).
+
 ## 0.1.2
 
 ### Fixed
