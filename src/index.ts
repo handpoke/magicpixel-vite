@@ -22,7 +22,7 @@
  */
 import type { Plugin, ResolvedConfig, ViteDevServer } from 'vite';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -36,7 +36,21 @@ export interface MagicPixelPluginOptions {
    * Useful for debugging; noisy in normal use.
    */
   verbose?: boolean;
+  /**
+   * Auto-update `@magicpixelart/cli` when a newer compatible version is
+   * available on npm. Runs once per dev-server start, gated to a daily check.
+   *
+   *  - 'minor' (default): auto-install any newer minor or patch within the
+   *    same major (e.g. 0.4.0 → 0.5.2 OK, 1.0.0 NOT auto-installed)
+   *  - 'patch':           auto-install only patches within the same minor
+   *  - false:             never auto-install (just warn when outdated)
+   *
+   * Always disabled when `process.env.CI` is truthy — CI builds must be
+   * reproducible from the lockfile.
+   */
+  autoUpdate?: 'minor' | 'patch' | false;
 }
+
 
 interface CliBin {
   binPath: string;
@@ -81,6 +95,193 @@ function makeLogger(server: ViteDevServer | null): { log: LogFn; warn: LogFn } {
     warn: (m) => console.warn(m),
   };
 }
+
+// ---------- Auto-update ----------
+//
+// Server-side schema changes (slug rules, manifest fields, etc.) ship with a
+// new CLI version. Beginners won't `npm i -D @magicpixelart/cli@latest` on
+// their own — so the plugin checks once per dev-server start and, if
+// `autoUpdate` allows it, installs the latest compatible version before
+// spawning the watcher. Any failure (offline, registry down, install error)
+// falls back to the installed CLI and logs a single line.
+
+interface UpdateCheckCache {
+  /** ISO timestamp of the last completed registry check. */
+  checkedAt: string;
+  /** Latest version we observed at that time. */
+  latest: string;
+}
+
+const UPDATE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
+const UPDATE_FETCH_TIMEOUT_MS = 2_500;
+
+function parseSemver(v: string): [number, number, number] | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v.trim());
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+function compareSemver(a: string, b: string): number {
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  if (!pa || !pb) return 0;
+  for (let i = 0; i < 3; i++) {
+    const ai = pa[i]!;
+    const bi = pb[i]!;
+    if (ai !== bi) return ai - bi;
+  }
+  return 0;
+}
+
+/** Decide whether `latest` is an "acceptable" upgrade from `installed`
+ *  under the given policy. Major bumps are NEVER auto-installed. */
+function isAcceptableUpgrade(
+  installed: string,
+  latest: string,
+  policy: 'minor' | 'patch',
+): boolean {
+  const pi = parseSemver(installed);
+  const pl = parseSemver(latest);
+  if (!pi || !pl) return false;
+  if (pl[0] !== pi[0]) return false; // major change — needs human
+  if (compareSemver(latest, installed) <= 0) return false;
+  if (policy === 'patch' && pl[1] !== pi[1]) return false;
+  return true;
+}
+
+function detectPackageManager(cwd: string): 'bun' | 'pnpm' | 'yarn' | 'npm' {
+  if (existsSync(resolve(cwd, 'bun.lockb')) || existsSync(resolve(cwd, 'bun.lock'))) return 'bun';
+  if (existsSync(resolve(cwd, 'pnpm-lock.yaml'))) return 'pnpm';
+  if (existsSync(resolve(cwd, 'yarn.lock'))) return 'yarn';
+  return 'npm';
+}
+
+function installArgs(pm: 'bun' | 'pnpm' | 'yarn' | 'npm'): { cmd: string; args: string[] } {
+  switch (pm) {
+    case 'bun':  return { cmd: 'bun',  args: ['add', '-d', '@magicpixelart/cli@latest'] };
+    case 'pnpm': return { cmd: 'pnpm', args: ['add', '-D', '@magicpixelart/cli@latest'] };
+    case 'yarn': return { cmd: 'yarn', args: ['add', '-D', '@magicpixelart/cli@latest'] };
+    case 'npm':  return { cmd: 'npm',  args: ['install', '-D', '@magicpixelart/cli@latest'] };
+  }
+}
+
+function loadUpdateCache(cwd: string): UpdateCheckCache | null {
+  try {
+    const p = resolve(cwd, 'node_modules', '.cache', 'magicpixel-update.json');
+    if (!existsSync(p)) return null;
+    return JSON.parse(readFileSync(p, 'utf8')) as UpdateCheckCache;
+  } catch {
+    return null;
+  }
+}
+
+function saveUpdateCache(cwd: string, cache: UpdateCheckCache): void {
+  try {
+    const dir = resolve(cwd, 'node_modules', '.cache');
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(resolve(dir, 'magicpixel-update.json'), JSON.stringify(cache));
+  } catch {
+    // Cache write failure is harmless — we just re-check on the next start.
+  }
+}
+
+async function fetchLatestVersion(): Promise<string | null> {
+  // `fetch` is global since Node 18, which Vite already requires. AbortSignal
+  // bounds the wait so a slow registry never delays vite dev startup.
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), UPDATE_FETCH_TIMEOUT_MS);
+  try {
+    const r = await fetch('https://registry.npmjs.org/@magicpixelart/cli/latest', {
+      signal: ctrl.signal,
+      headers: { Accept: 'application/json' },
+    });
+    if (!r.ok) return null;
+    const body = (await r.json()) as { version?: string };
+    return typeof body.version === 'string' ? body.version : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
+ * Run the auto-update check and, if appropriate, perform the install
+ * synchronously. Resolves once it is safe to spawn the watcher (either the
+ * install completed, or we decided not to install). Never throws.
+ */
+async function maybeAutoUpdate(
+  cwd: string,
+  installedVersion: string,
+  opts: MagicPixelPluginOptions,
+  logger: { log: LogFn; warn: LogFn },
+): Promise<void> {
+  const policy = opts.autoUpdate ?? 'minor';
+  if (policy === false) return;
+  if (process.env.CI) return;
+  if (!parseSemver(installedVersion)) return; // 'unknown' / unparseable
+
+  const cache = loadUpdateCache(cwd);
+  const now = Date.now();
+  let latest: string | null = null;
+  if (cache && now - new Date(cache.checkedAt).getTime() < UPDATE_CHECK_TTL_MS) {
+    latest = cache.latest;
+  } else {
+    latest = await fetchLatestVersion();
+    if (latest) saveUpdateCache(cwd, { checkedAt: new Date(now).toISOString(), latest });
+  }
+  if (!latest) return;
+  if (compareSemver(latest, installedVersion) <= 0) return;
+
+  if (!isAcceptableUpgrade(installedVersion, latest, policy)) {
+    // Major bump or out-of-policy — surface a one-liner but don't install.
+    logger.warn(
+      `[magicpixel] CLI ${latest} is available (installed ${installedVersion}). ` +
+        `Run \`npm i -D @magicpixelart/cli@latest\` to upgrade.`,
+    );
+    return;
+  }
+
+  const pm = detectPackageManager(cwd);
+  const { cmd, args } = installArgs(pm);
+  logger.log(`[magicpixel] updating CLI ${installedVersion} → ${latest} via ${pm}…`);
+  // Async spawn — `childSpawnSync` blocks the Node event loop for up to the
+  // install duration, which would freeze `vite dev` startup for tens of
+  // seconds on a cold npm cache. We still await this promise so the watcher
+  // doesn't spawn against the old CLI mid-install, but the event loop stays
+  // responsive (HMR, plugin init, etc. continue elsewhere).
+  const result = await new Promise<{ code: number | null; tail: string }>((resolveInstall) => {
+    const child = spawn(cmd, args, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
+    });
+    const chunks: string[] = [];
+    child.stdout?.on('data', (b: Buffer) => chunks.push(b.toString('utf8')));
+    child.stderr?.on('data', (b: Buffer) => chunks.push(b.toString('utf8')));
+    const killTimer = setTimeout(() => {
+      try { child.kill('SIGTERM'); } catch { /* already gone */ }
+    }, 120_000);
+    child.once('error', (err) => {
+      clearTimeout(killTimer);
+      resolveInstall({ code: null, tail: err.message });
+    });
+    child.once('exit', (code) => {
+      clearTimeout(killTimer);
+      const tail = chunks.join('').trim().split('\n').slice(-3).join(' | ');
+      resolveInstall({ code, tail });
+    });
+  });
+  if (result.code === 0) {
+    logger.log(`[magicpixel] CLI updated to ${latest}.`);
+  } else {
+    logger.warn(
+      `[magicpixel] auto-update failed (${pm} exit ${result.code ?? 'null'}). ` +
+        `Continuing with ${installedVersion}. ${result.tail}`,
+    );
+  }
+}
+
 
 interface SpawnResult {
   child: ChildProcess;
@@ -236,7 +437,14 @@ export function magicpixel(opts: MagicPixelPluginOptions = {}): Plugin {
           }, delay).unref?.();
         });
       };
-      startWatcher();
+
+      // Best-effort auto-update before the first watcher spawn. The fetch is
+      // bounded to ~2.5s and the install to 120s — any failure is logged and
+      // we proceed with the currently-installed CLI.
+      const installedNow = findCliBin(cwd)?.pkgVersion ?? 'unknown';
+      maybeAutoUpdate(cwd, installedNow, opts, logger)
+        .catch(() => { /* never escalate */ })
+        .finally(() => startWatcher());
 
       const cleanup = () => {
         stopped = true;

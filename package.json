@@ -1,6 +1,6 @@
 {
   "name": "@magicpixelart/vite",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Vite plugin that auto-syncs MagicPixel pixel-art assets into your project — no second terminal required.",
   "type": "module",
   "main": "./dist/index.js",
@@ -49,7 +49,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@magicpixelart/cli": "^0.4.0"
+    "@magicpixelart/cli": "^0.5.0"
   },
   "peerDependencies": {
     "vite": "^4.0.0 || ^5.0.0 || ^6.0.0 || ^7.0.0"

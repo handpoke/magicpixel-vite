@@ -1,6 +1,30 @@
 # Changelog
 
+## 0.2.0
+
+### Added
+- **Auto-update `@magicpixelart/cli`.** On dev-server start the plugin
+  checks the npm registry once per 24h and, when a newer compatible
+  version is available, installs it via the project's package manager
+  (bun / pnpm / yarn / npm — detected from the lockfile) before spawning
+  the watcher. Beginners no longer need to remember `npm i -D
+  @magicpixelart/cli@latest` to pick up server-side schema changes.
+  - Default policy: `'minor'` — auto-installs newer minor or patch within
+    the same major. Major bumps log a one-liner instead.
+  - Configurable via `magicpixel({ autoUpdate: 'patch' | 'minor' | false })`.
+  - Disabled automatically when `process.env.CI` is truthy so CI builds
+    stay reproducible from the lockfile.
+  - Registry check is bounded to ~2.5s; the install runs asynchronously
+    (does not block the Node event loop) with a 120s hard timeout. Any
+    failure falls back to the installed CLI and logs a single warn line.
+
+### Changed
+- Depend on `@magicpixelart/cli@^0.5.0` to ship the legacy slug-folder
+  sweep out of the box (fresh installs don't have to wait for the
+  auto-update tick).
+
 ## 0.1.3
+
 
 ### Changed
 - Depend on `@magicpixelart/cli@^0.4.0` (aligns with the current CLI release; `^0.5.0` was unpublished and broke fresh installs).
